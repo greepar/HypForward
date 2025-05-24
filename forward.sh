@@ -52,7 +52,7 @@ Add_forwarding(){
 	iptables -t nat -A POSTROUTING -p tcp -d "${forwarding_ip}" --dport "${local_port}" -j SNAT --to-source "${local_ip}"
     iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport "${local_port}" -j ACCEPT
 	iptables-save > /etc/iptables.up.rules
-    ufw allow ${local_port}/tcp
+    ufw disable
 	echo && echo -e "——————————————————————————————
 	端口转发规则配置完成 !\n
 	游戏内输入的服务器 IP\t: ${Green_font_prefix}${local_ip}:${local_port}${Font_color_suffix}\n
