@@ -56,7 +56,7 @@ run_as_root() {
 }
 
 validate_servers() {
-    if ! printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9._:=,\[\]%-]+$'; then
+    if ! printf '%s\n' "$1" | LC_ALL=C grep -Eq '^[][A-Za-z0-9._:=,%+-]+$'; then
         fail "forwarding rules contain unsupported characters"
     fi
 }
