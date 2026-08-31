@@ -5,6 +5,9 @@ REPOSITORY="${HYPFORWARD_REPOSITORY:-greepar/HypForward}"
 VERSION="${HYPFORWARD_VERSION:-latest}"
 INSTALL_DIR="${HYPFORWARD_INSTALL_DIR:-/usr/local/bin}"
 INSTALL_SERVICE="${HYPFORWARD_INSTALL_SERVICE:-auto}"
+SERVERS="${HYPFORWARD_SERVERS:-0.0.0.0:25565=mc.hypixel.net:25565}"
+CONFIG_FILE="${HYPFORWARD_CONFIG_FILE:-/etc/hypforward.conf}"
+ACTION="${HYPFORWARD_ACTION:-${1:-menu}}"
 
 info() {
     printf '[*] %s\n' "$*"
@@ -52,6 +55,24 @@ run_as_root() {
     fi
 }
 
+validate_servers() {
+    if ! printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9._:=,\[\]%-]+$'; then
+        fail "forwarding rules contain unsupported characters"
+    fi
+}
+
+write_config() {
+    servers=$1
+    validate_servers "$servers"
+    config_dir=${CONFIG_FILE%/*}
+    [ "$config_dir" = "$CONFIG_FILE" ] && config_dir=.
+    config_file="${tmp_dir}/hypforward.conf"
+    printf 'HYPFORWARD_SERVERS=%s\n' "$servers" >"$config_file"
+    run_as_root mkdir -p "$config_dir"
+    run_as_root install -m 0644 "$config_file" "$CONFIG_FILE"
+    info "Saved forwarding rules to ${CONFIG_FILE}"
+}
+
 install_systemd_service() {
     service_file="${tmp_dir}/hypforward.service"
     cat >"$service_file" <<EOF
@@ -62,6 +83,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+EnvironmentFile=-${CONFIG_FILE}
 ExecStart=${INSTALL_DIR}/hypforward
 Restart=on-failure
 RestartSec=3
@@ -89,6 +111,11 @@ description="HypForward Minecraft forwarding proxy"
 command="${INSTALL_DIR}/hypforward"
 command_background="yes"
 pidfile="/run/hypforward.pid"
+
+if [ -f "${CONFIG_FILE}" ]; then
+    . "${CONFIG_FILE}"
+    export HYPFORWARD_SERVERS
+fi
 
 depend() {
     need net
@@ -121,6 +148,11 @@ install_sysv_service() {
 DAEMON="${INSTALL_DIR}/hypforward"
 PIDFILE="/run/hypforward.pid"
 LOGFILE="/var/log/hypforward.log"
+
+if [ -f "${CONFIG_FILE}" ]; then
+    . "${CONFIG_FILE}"
+    export HYPFORWARD_SERVERS
+fi
 
 is_running() {
     [ -f "\$PIDFILE" ] && kill -0 "\$(cat "\$PIDFILE")" 2>/dev/null
@@ -173,6 +205,10 @@ install_runit_service() {
     cat >"$run_file" <<EOF
 #!/bin/sh
 exec 2>&1
+if [ -f "${CONFIG_FILE}" ]; then
+    . "${CONFIG_FILE}"
+    export HYPFORWARD_SERVERS
+fi
 exec ${INSTALL_DIR}/hypforward
 EOF
     run_as_root mkdir -p /etc/sv/hypforward
@@ -205,6 +241,139 @@ detect_init_system() {
     fi
 }
 
+uninstall_service() {
+    if [ -f /etc/systemd/system/hypforward.service ]; then
+        if command_exists systemctl; then
+            run_as_root systemctl disable --now hypforward.service 2>/dev/null || true
+        fi
+        run_as_root rm -f /etc/systemd/system/hypforward.service
+        if command_exists systemctl; then
+            run_as_root systemctl daemon-reload
+        fi
+        info "Removed systemd service"
+    fi
+
+    if [ -f /etc/init.d/hypforward ] && command_exists rc-service && command_exists rc-update; then
+        run_as_root rc-service hypforward stop 2>/dev/null || true
+        run_as_root rc-update del hypforward default 2>/dev/null || true
+        run_as_root rm -f /etc/init.d/hypforward
+        info "Removed OpenRC service"
+    elif [ -f /etc/init.d/hypforward ]; then
+        if command_exists service; then
+            run_as_root service hypforward stop 2>/dev/null || true
+        fi
+        if command_exists update-rc.d; then
+            run_as_root update-rc.d -f hypforward remove 2>/dev/null || true
+        elif command_exists chkconfig; then
+            run_as_root chkconfig --del hypforward 2>/dev/null || true
+        fi
+        run_as_root rm -f /etc/init.d/hypforward
+        info "Removed SysV service"
+    fi
+
+    if [ -d /etc/sv/hypforward ]; then
+        if command_exists sv; then
+            run_as_root sv down hypforward 2>/dev/null || true
+        fi
+        run_as_root rm -f /var/service/hypforward /etc/service/hypforward
+        run_as_root rm -rf /etc/sv/hypforward
+        info "Removed runit service"
+    fi
+}
+
+uninstall() {
+    if [ "$os" = linux ]; then
+        uninstall_service
+    fi
+
+    run_as_root rm -f "${INSTALL_DIR}/hypforward"
+    run_as_root rm -f "$CONFIG_FILE"
+    info "Removed ${INSTALL_DIR}/hypforward"
+    info "Removed ${CONFIG_FILE}"
+    info "HypForward has been uninstalled"
+}
+
+restart_service() {
+    if [ -f /etc/systemd/system/hypforward.service ] && command_exists systemctl; then
+        run_as_root systemctl restart hypforward.service
+    elif [ -f /etc/init.d/hypforward ] && command_exists rc-service && command_exists rc-update; then
+        run_as_root rc-service hypforward restart
+    elif [ -f /etc/init.d/hypforward ] && command_exists service; then
+        run_as_root service hypforward restart
+    elif [ -d /etc/sv/hypforward ] && command_exists sv; then
+        run_as_root sv restart hypforward
+    else
+        info "No installed service detected; start hypforward manually"
+        return
+    fi
+    info "HypForward service restarted"
+}
+
+configure() {
+    if [ -n "${HYPFORWARD_SERVERS:-}" ]; then
+        servers=$HYPFORWARD_SERVERS
+    elif [ -r /dev/tty ]; then
+        printf '%s\n' "Enter forwarding rules separated by commas:" >/dev/tty
+        printf '%s\n' "Example: 0.0.0.0:25565=mc.hypixel.net:25565,0.0.0.0:25566=example.com:25565" >/dev/tty
+        printf '> ' >/dev/tty
+        IFS= read -r servers </dev/tty
+    else
+        fail "set HYPFORWARD_SERVERS for non-interactive configuration"
+    fi
+
+    [ -n "$servers" ] || fail "forwarding rules must not be empty"
+    write_config "$servers"
+    restart_service
+}
+
+show_status() {
+    if [ -x "${INSTALL_DIR}/hypforward" ]; then
+        info "Binary: ${INSTALL_DIR}/hypforward"
+    else
+        info "Binary: not installed"
+    fi
+
+    if [ -f "$CONFIG_FILE" ]; then
+        info "Configuration: ${CONFIG_FILE}"
+        run_as_root cat "$CONFIG_FILE"
+    else
+        info "Configuration: not found"
+    fi
+
+    if [ -f /etc/systemd/system/hypforward.service ] && command_exists systemctl; then
+        run_as_root systemctl status hypforward.service --no-pager || true
+    elif [ -f /etc/init.d/hypforward ] && command_exists rc-service && command_exists rc-update; then
+        run_as_root rc-service hypforward status || true
+    elif [ -f /etc/init.d/hypforward ] && command_exists service; then
+        run_as_root service hypforward status || true
+    elif [ -d /etc/sv/hypforward ] && command_exists sv; then
+        run_as_root sv status hypforward || true
+    else
+        info "Service: not installed"
+    fi
+}
+
+show_menu() {
+    [ -r /dev/tty ] || fail "interactive menu requires a terminal"
+    printf '\n%s\n' "=== HypForward Manager ===" >/dev/tty
+    printf '%s\n' "1. Install or upgrade" >/dev/tty
+    printf '%s\n' "2. Uninstall" >/dev/tty
+    printf '%s\n' "3. Configure servers" >/dev/tty
+    printf '%s\n' "4. View status" >/dev/tty
+    printf '%s\n' "5. Exit" >/dev/tty
+    printf 'Select [1-5]: ' >/dev/tty
+    IFS= read -r choice </dev/tty
+
+    case "$choice" in
+        1) ACTION=install ;;
+        2) ACTION=uninstall ;;
+        3) ACTION=config ;;
+        4) ACTION=status ;;
+        5) exit 0 ;;
+        *) fail "invalid selection '${choice}'" ;;
+    esac
+}
+
 case "$(uname -s)" in
     Linux)
         os=linux
@@ -229,6 +398,33 @@ case "$(uname -m)" in
         ;;
 esac
 
+tmp_dir=$(mktemp -d 2>/dev/null || mktemp -d -t hypforward)
+trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+
+if [ "$ACTION" = menu ]; then
+    show_menu
+fi
+
+case "$ACTION" in
+    install)
+        ;;
+    uninstall | remove)
+        uninstall
+        exit 0
+        ;;
+    config | configure)
+        configure
+        exit 0
+        ;;
+    status | view)
+        show_status
+        exit 0
+        ;;
+    *)
+        fail "unknown action '${ACTION}'; use install, uninstall, config, or status"
+        ;;
+esac
+
 archive="hypforward-${os}-${arch}.tar.gz"
 if [ "$VERSION" = latest ]; then
     base_url="https://github.com/${REPOSITORY}/releases/latest/download"
@@ -239,9 +435,6 @@ else
     esac
     base_url="https://github.com/${REPOSITORY}/releases/download/${release_tag}"
 fi
-
-tmp_dir=$(mktemp -d 2>/dev/null || mktemp -d -t hypforward)
-trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
 info "Downloading ${archive}"
 download "${base_url}/${archive}" "${tmp_dir}/${archive}"
@@ -263,6 +456,8 @@ info "Installed ${INSTALL_DIR}/hypforward"
 if [ "$os" != linux ] || [ "$INSTALL_SERVICE" = 0 ] || [ "$INSTALL_SERVICE" = none ]; then
     info "Run hypforward to start the proxy"
 else
+    write_config "$SERVERS"
+
     if [ "$INSTALL_SERVICE" = auto ] || [ "$INSTALL_SERVICE" = 1 ]; then
         init_system=$(detect_init_system)
     else
