@@ -1,0 +1,16 @@
+[package]
+name = "hypforward"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "High-performance asynchronous Minecraft handshake forwarding proxy"
+repository = "https://github.com/greepar/HypForward"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
